@@ -28,20 +28,22 @@ class PercentageDiscountStrategy(DiscountStrategy):
         return (self.percent / 100.0) * base_amount
 
 
-class PercentageWithCapStrategy(DiscountStrategy):
-    def __init__(self, percent: float, cap_val: float):
+class PercentageWithThresholdStrategy(DiscountStrategy):
+    def __init__(self, percent: float, min_required_amount: float):
         self.percent = percent
-        self.cap = cap_val
+        self.threshold = min_required_amount
 
     def calculate(self, base_amount: float) -> float:
-        disc = (self.percent / 100.0) * base_amount
-        return self.cap if disc > self.cap else disc
+        # If the real cart amount is below the required threshold, no discount is given
+        if base_amount < self.threshold:
+            return 0.0
+        return (self.percent / 100.0) * base_amount
 
 
 class StrategyType(Enum):
     FLAT = auto()
     PERCENT = auto()
-    PERCENT_WITH_CAP = auto()
+    PERCENT_WITH_THRESHOLD = auto()
 
 
 # ----------------------------
@@ -64,8 +66,8 @@ class DiscountStrategyManager:
             return FlatDiscountStrategy(param1)
         elif strategy_type == StrategyType.PERCENT:
             return PercentageDiscountStrategy(param1)
-        elif strategy_type == StrategyType.PERCENT_WITH_CAP:
-            return PercentageWithCapStrategy(param1, param2)
+        elif strategy_type == StrategyType.PERCENT_WITH_THRESHOLD:
+            return PercentageWithThresholdStrategy(param1, param2)
         return None
 
 
@@ -155,7 +157,7 @@ class Coupon(ABC):
         if self.is_applicable(cart):
             discount = self.get_discount(cart)
             cart.apply_discount(discount)
-            print(f"{self.name()} applied: {discount}")
+            print(f"{self.name()} applied: {discount:.2f}")
             if not self.is_combinable():
                 return
 
@@ -239,21 +241,56 @@ class BulkPurchaseDiscount(Coupon):
 
 
 class BankingCoupon(Coupon):
-    def __init__(self, bank: str, min_spend: float, percent: float, off_cap: float):
+    def __init__(self, bank: str, min_spend: float, percent: float):
         super().__init__()
         self.bank = bank
         self.min_spend = min_spend
         self.percent = percent
-        self.off_cap = off_cap
+        # Configured StrategyType.PERCENT_WITH_THRESHOLD using min_spend as the second parameter
         self.strat = DiscountStrategyManager.get_instance().get_strategy(
-            StrategyType.PERCENT_WITH_CAP, self.percent, self.off_cap
+            StrategyType.PERCENT_WITH_THRESHOLD, self.percent, self.min_spend
         )
 
     def is_applicable(self, cart: Cart) -> bool:
+        # Validates that the current remaining total satisfies the minimum required spend requirement
         return cart.payment_bank == self.bank and cart.current_total >= self.min_spend
 
     def get_discount(self, cart: Cart) -> float:
         return self.strat.calculate(cart.current_total) if self.strat else 0.0
 
     def name(self) -> str:
-        return f"Banking Coupon ({self.bank}): {int(self.percent)}% off up to {int(self.off_cap)}"
+        return f"Banking Coupon ({self.bank}): {int(self.percent)}% off on orders over Rs {int(self.min_spend)}"
+
+
+# ----------------------------
+# Operational Payload Example (Verification Check)
+# ----------------------------
+if __name__ == "__main__":
+    # Create products
+    laptop = Product("ZenBook", "Electronics", 50000.0)
+    shirt = Product("Oxford Shirt", "Apparel", 2000.0)
+
+    # Initialize Cart
+    cart = Cart()
+    cart.add_product(laptop, i=1)
+    cart.add_product(shirt, qty=2)
+    cart.loyalty_member = True
+    cart.payment_bank = "HDFC"
+
+    print(f"Initial Cart Total: Rs {cart.original_total:.2f}\n")
+
+    # Set up Chain of Responsibility Links
+    seasonal = SeasonalOffer(10.0, "Apparel")      # 10% off apparel (2000 * 2 = 4000 -> 400 off)
+    bulk = BulkPurchaseDiscount(40000.0, 1000.0)   # Rs 1000 off orders over 40k
+    loyalty = LoyaltyDiscount(5.0)                 # 5% off remaining balance
+    banking = BankingCoupon("HDFC", 45000.0, 10.0) # 10% off if bank matches AND remaining cart >= 45k
+
+    # Link chains
+    seasonal.next = bulk
+    bulk.next = loyalty
+    loyalty.next = banking
+
+    # Process processing pipeline
+    seasonal.apply_discount(cart)
+
+    print(f"\nFinal Payable Total: Rs {cart.current_total:.2f}")
